@@ -26,6 +26,12 @@
 #include "tfm_log.h"
 #include "uart_stdout.h"
 
+#ifdef TFM_PSA_API
+#include "psa_manifest/sid.h"
+#endif
+
+#include <cmsis.h>
+
 /**
  * \brief Modified table template for user defined SVC functions
  *
@@ -66,6 +72,11 @@ static const osThreadAttr_t thread_attr = {
     .name = "test_thread",
     .stack_size = 4096U
 };
+#else
+static const osThreadAttr_t thread_attr = {
+    .name = "main_application_thread",
+    .stack_size = 4096U
+};
 #endif
 
 #ifdef TFM_MULTI_CORE_NS_OS_MAILBOX_THREAD
@@ -83,6 +94,8 @@ static const osThreadAttr_t mailbox_thread_attr = {
 #if defined(TEST_FRAMEWORK_NS) || defined(TEST_FRAMEWORK_S) \
  || defined(PSA_API_TEST_NS)
 static osThreadFunc_t thread_func;
+#else
+static osThreadFunc_t main_application_thread;
 #endif
 
 #ifdef TFM_MULTI_CORE_TOPOLOGY
@@ -141,6 +154,49 @@ __WEAK int32_t tfm_ns_platform_uninit(void)
     return ARM_DRIVER_OK;
 }
 
+void main_thread(void *argument)
+{
+    UNUSED_VARIABLE(argument);
+
+    printf("Enable use of FP registers\r\n");
+    SCB->CPACR |= (0x3 << 20) | (0x3 | 22);
+
+    printf("Enable automatic state preservation and lazy stacking\n");
+    FPU->FPCCR = FPU_FPCCR_ASPEN_Msk | FPU_FPCCR_LSPEN_Msk;
+
+    /* Confirm CONTROL.FPCA has not been set yet */
+    printf("CONTROL_NS.FPCA: %u\r\n", (__get_CONTROL() & CONTROL_FPCA_Msk) >> CONTROL_FPCA_Pos);
+
+    /* Enable Interrupt */
+    printf("TIMER1IRQn %u\n", TIMER1_IRQn);
+    NVIC_ClearPendingIRQ(TIMER1_IRQn);
+    NVIC_EnableIRQ(TIMER1_IRQn);
+    __DSB();
+    __ISB();
+
+    printf("Make use of FP registers\n");
+
+    uint32_t result;
+    __ASM volatile ("VMRS %0, fpscr" : "=r" (result) );
+    __DSB();
+    __ISB();
+    /* Confirm CONTROL.FPCA is now been set */
+    printf("CONTROL_NS.FPCA: %u\r\n", (__get_CONTROL() & CONTROL_FPCA_Msk) >> CONTROL_FPCA_Pos);
+
+    /* Call a Secure function while CONTROL.FPCA is set. */
+    (void)psa_connect(IPC_SERVICE_TEST_PSA_ACCESS_APP_READ_ONLY_MEM_SID,
+                         IPC_SERVICE_TEST_PSA_ACCESS_APP_READ_ONLY_MEM_VERSION);
+
+    /* The Secure domain will simulate a NS IRQ firing, which will
+     * attempt to use the FP registers.
+     */
+
+    /* Test completes here. However, the System
+     * crashes before seeing this message.
+     */
+    printf("TEST COMPLETED SUCCESSFULLY\n");
+}
+
 /**
  * \brief main() function
  */
@@ -171,11 +227,15 @@ int main(void)
     thread_func = test_app;
 #elif defined(PSA_API_TEST_NS)
     thread_func = psa_api_test;
+#else
+    main_application_thread = main_thread;
 #endif
 
 #if defined(TEST_FRAMEWORK_NS) || defined(TEST_FRAMEWORK_S) \
  || defined(PSA_API_TEST_NS)
     (void) osThreadNew(thread_func, NULL, &thread_attr);
+#else
+    (void) osThreadNew(main_application_thread, NULL, &thread_attr);
 #endif
 
     LOG_MSG("Non-Secure system starting...\r\n");
@@ -184,4 +244,18 @@ int main(void)
     /* Reached only in case of error */
     for (;;) {
     }
+}
+
+void TIMER1_Handler(void)
+{
+    uint32_t result;
+
+    /* ISR makes use of FP registers. If LSPACT is set,
+     * state preservation will be activated.
+     */
+    __ASM volatile ("VMRS %0, fpscr" : "=r" (result) );
+    __DSB();
+    __ISB();
+
+    (void)result;
 }
