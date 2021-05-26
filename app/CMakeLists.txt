@@ -62,6 +62,11 @@ target_link_libraries(tfm_ns_interface
         tfm_partition_defs
 )
 
+target_compile_options(tfm_ns_interface
+    INTERFACE -mfpu=fpv5-sp-d16 -mfloat-abi=softfp)
+target_link_options(tfm_ns_interface
+    INTERFACE -mfpu=fpv5-sp-d16 -mfloat-abi=softfp)
+
 target_compile_definitions(tfm_ns_interface
     INTERFACE
         $<$<BOOL:${TFM_PSA_API}>:TFM_PSA_API>
